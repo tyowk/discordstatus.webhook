@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
+
 app.use(express.json({ limit: '1mb' }));
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
@@ -10,7 +11,7 @@ const STATUS_COLORS = {
   none: 0x2ecc71,
   minor: 0xf1c40f,
   major: 0xe67e22,
-  critical: 0xe74c3c,
+  critical: 0xe74c3c
 };
 
 const STATUS_LABELS = {
@@ -18,14 +19,7 @@ const STATUS_LABELS = {
   degraded_performance: 'Degraded Performance',
   partial_outage: 'Partial Outage',
   major_outage: 'Major Outage',
-  under_maintenance: 'Under Maintenance',
-};
-
-const IMPACT_LABELS = {
-  none: 'None',
-  minor: 'Minor',
-  major: 'Major',
-  critical: 'Critical',
+  under_maintenance: 'Under Maintenance'
 };
 
 const INCIDENT_STATUS_LABELS = {
@@ -35,12 +29,8 @@ const INCIDENT_STATUS_LABELS = {
   resolved: 'Resolved',
   scheduled: 'Scheduled',
   in_progress: 'In Progress',
-  verifying: 'Verifying',
+  verifying: 'Verifying'
 };
-
-function getColor(statusIndicator) {
-  return STATUS_COLORS[statusIndicator] ?? 0x95a5a6;
-}
 
 function formatStatus(value) {
   if (!value) return 'Unknown';
@@ -48,24 +38,26 @@ function formatStatus(value) {
   return (
     STATUS_LABELS[value] ||
     INCIDENT_STATUS_LABELS[value] ||
-    IMPACT_LABELS[value] ||
     value
       .replace(/_/g, ' ')
-      .replace(/\b\w/g, char => char.toUpperCase())
+      .replace(/\b\w/g, c => c.toUpperCase())
   );
 }
 
-function truncate(value, maxLength) {
+function getColor(indicator) {
+  return STATUS_COLORS[indicator] ?? 0x95a5a6;
+}
+
+function truncate(value, length) {
   if (!value) return '';
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength - 3)}...`;
+
+  return value.length > length
+    ? `${value.slice(0, length - 3)}...`
+    : value;
 }
 
 function buildComponentEmbed(payload) {
   const { page, component, component_update } = payload;
-
-  const oldStatus = component_update?.old_status;
-  const newStatus = component_update?.new_status;
 
   return {
     title: `Component Status Changed: ${component?.name || 'Unknown Component'}`,
@@ -73,24 +65,24 @@ function buildComponentEmbed(payload) {
     fields: [
       {
         name: 'Previous Status',
-        value: formatStatus(oldStatus),
-        inline: true,
+        value: formatStatus(component_update?.old_status),
+        inline: true
       },
       {
         name: 'Current Status',
-        value: formatStatus(newStatus),
-        inline: true,
+        value: formatStatus(component_update?.new_status),
+        inline: true
       },
       {
         name: 'Page Status',
         value: page?.status_description || 'Unknown',
-        inline: false,
-      },
+        inline: false
+      }
     ],
     timestamp: component_update?.created_at || new Date().toISOString(),
     footer: {
-      text: `Component ID: ${component?.id || component_update?.component_id || 'Unknown'}`,
-    },
+      text: `Component ID: ${component?.id || component_update?.component_id || 'Unknown'}`
+    }
   };
 }
 
@@ -110,23 +102,26 @@ function buildIncidentEmbed(payload) {
       {
         name: 'Status',
         value: formatStatus(incident?.status),
-        inline: true,
+        inline: true
       },
       {
         name: 'Impact',
         value: formatStatus(incident?.impact),
-        inline: true,
+        inline: true
       },
       {
         name: 'Page Status',
         value: page?.status_description || 'Unknown',
-        inline: false,
-      },
+        inline: false
+      }
     ],
-    timestamp: incident?.updated_at || incident?.created_at || new Date().toISOString(),
+    timestamp:
+      incident?.updated_at ||
+      incident?.created_at ||
+      new Date().toISOString(),
     footer: {
-      text: `Incident ID: ${incident?.id || 'Unknown'}`,
-    },
+      text: `Incident ID: ${incident?.id || 'Unknown'}`
+    }
   };
 
   if (latestUpdate?.body) {
@@ -140,8 +135,8 @@ function buildIncidentEmbed(payload) {
   return embed;
 }
 
-function buildPayload(payload) {
-  if (payload?.component_update && payload?.component) {
+function buildEmbed(payload) {
+  if (payload?.component_update) {
     return buildComponentEmbed(payload);
   }
 
@@ -152,22 +147,23 @@ function buildPayload(payload) {
   return null;
 }
 
-app.post('/api/webhook', async (req, res) => {
+async function handleWebhook(req, res) {
   if (!DISCORD_WEBHOOK_URL) {
     console.error('DISCORD_WEBHOOK_URL is not configured');
+
     return res.status(500).json({
-      error: 'Discord webhook is not configured',
+      ok: false,
+      error: 'Discord webhook is not configured'
     });
   }
 
   try {
-    const embed = buildPayload(req.body);
+    const embed = buildEmbed(req.body);
 
     if (!embed) {
       return res.status(200).json({
         ok: true,
-        ignored: true,
-        message: 'No supported Statuspage event found',
+        ignored: true
       });
     }
 
@@ -175,42 +171,44 @@ app.post('/api/webhook', async (req, res) => {
       DISCORD_WEBHOOK_URL,
       {
         username: 'Statuspage',
-        embeds: [embed],
+        embeds: [embed]
       },
       {
         timeout: 10000,
         headers: {
-          'Content-Type': 'application/json',
-        },
+          'Content-Type': 'application/json'
+        }
       }
     );
 
     return res.status(200).json({
-      ok: true,
+      ok: true
     });
   } catch (error) {
     console.error(
-      'Failed to forward Statuspage webhook:',
+      'Discord delivery failed:',
       error.response?.data || error.message
     );
 
     return res.status(502).json({
       ok: false,
-      error: 'Failed to forward webhook to Discord',
+      error: 'Failed to deliver webhook'
     });
   }
-});
+}
 
-app.get('/api/webhook', (req, res) => {
+app.get('/', (req, res) => {
   res.status(200).json({
     ok: true,
-    service: 'statuspage-discord-webhook',
+    service: 'statuspage-discord-webhook'
   });
 });
 
-app.all('/health', (req, res) => {
+app.post('/', handleWebhook);
+
+app.get('/health', (req, res) => {
   res.status(200).json({
-    ok: true,
+    ok: true
   });
 });
 
