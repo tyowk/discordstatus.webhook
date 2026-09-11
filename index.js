@@ -71,4 +71,8 @@ app.post('/api/webhook', async (req, res) => {
   }
 });
 
+app.all('/health', (req, res) => {
+  return res.status(200).send('OK');
+});
+
 module.exports = app;
