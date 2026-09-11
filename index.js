@@ -2,77 +2,216 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
-const statusColors = {
+const STATUS_COLORS = {
   none: 0x2ecc71,
   minor: 0xf1c40f,
   major: 0xe67e22,
   critical: 0xe74c3c,
 };
 
+const STATUS_LABELS = {
+  operational: 'Operational',
+  degraded_performance: 'Degraded Performance',
+  partial_outage: 'Partial Outage',
+  major_outage: 'Major Outage',
+  under_maintenance: 'Under Maintenance',
+};
+
+const IMPACT_LABELS = {
+  none: 'None',
+  minor: 'Minor',
+  major: 'Major',
+  critical: 'Critical',
+};
+
+const INCIDENT_STATUS_LABELS = {
+  investigating: 'Investigating',
+  identified: 'Identified',
+  monitoring: 'Monitoring',
+  resolved: 'Resolved',
+  scheduled: 'Scheduled',
+  in_progress: 'In Progress',
+  verifying: 'Verifying',
+};
+
+function getColor(statusIndicator) {
+  return STATUS_COLORS[statusIndicator] ?? 0x95a5a6;
+}
+
+function formatStatus(value) {
+  if (!value) return 'Unknown';
+
+  return (
+    STATUS_LABELS[value] ||
+    INCIDENT_STATUS_LABELS[value] ||
+    IMPACT_LABELS[value] ||
+    value
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, char => char.toUpperCase())
+  );
+}
+
+function truncate(value, maxLength) {
+  if (!value) return '';
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
 function buildComponentEmbed(payload) {
   const { page, component, component_update } = payload;
+
+  const oldStatus = component_update?.old_status;
+  const newStatus = component_update?.new_status;
+
   return {
-    title: `Component Status Changed: ${component.name}`,
-    color: statusColors[page.status_indicator] || 0x95a5a6,
+    title: `Component Status Changed: ${component?.name || 'Unknown Component'}`,
+    color: getColor(page?.status_indicator),
     fields: [
-      { name: 'Old Status', value: component_update.old_status, inline: true },
-      { name: 'New Status', value: component_update.new_status, inline: true },
-      { name: 'Page Status', value: page.status_description, inline: false },
+      {
+        name: 'Previous Status',
+        value: formatStatus(oldStatus),
+        inline: true,
+      },
+      {
+        name: 'Current Status',
+        value: formatStatus(newStatus),
+        inline: true,
+      },
+      {
+        name: 'Page Status',
+        value: page?.status_description || 'Unknown',
+        inline: false,
+      },
     ],
-    timestamp: component_update.created_at,
-    footer: { text: `Page ID: ${page.id}` },
+    timestamp: component_update?.created_at || new Date().toISOString(),
+    footer: {
+      text: `Component ID: ${component?.id || component_update?.component_id || 'Unknown'}`,
+    },
   };
 }
 
 function buildIncidentEmbed(payload) {
   const { page, incident } = payload;
-  const latestUpdate = incident.incident_updates[0];
-  return {
-    title: `Incident: ${incident.name}`,
-    url: incident.shortlink,
-    description: latestUpdate ? latestUpdate.body : 'No update body provided.',
-    color: statusColors[page.status_indicator] || 0x95a5a6,
+
+  const updates = Array.isArray(incident?.incident_updates)
+    ? incident.incident_updates
+    : [];
+
+  const latestUpdate = updates[0];
+
+  const embed = {
+    title: `Incident: ${incident?.name || 'Unnamed Incident'}`,
+    color: getColor(page?.status_indicator),
     fields: [
-      { name: 'Status', value: incident.status, inline: true },
-      { name: 'Impact', value: incident.impact, inline: true },
-      { name: 'Page Status', value: page.status_description, inline: false },
+      {
+        name: 'Status',
+        value: formatStatus(incident?.status),
+        inline: true,
+      },
+      {
+        name: 'Impact',
+        value: formatStatus(incident?.impact),
+        inline: true,
+      },
+      {
+        name: 'Page Status',
+        value: page?.status_description || 'Unknown',
+        inline: false,
+      },
     ],
-    timestamp: incident.updated_at,
-    footer: { text: `Incident ID: ${incident.id}` },
+    timestamp: incident?.updated_at || incident?.created_at || new Date().toISOString(),
+    footer: {
+      text: `Incident ID: ${incident?.id || 'Unknown'}`,
+    },
   };
+
+  if (latestUpdate?.body) {
+    embed.description = truncate(latestUpdate.body, 4096);
+  }
+
+  if (incident?.shortlink) {
+    embed.url = incident.shortlink;
+  }
+
+  return embed;
+}
+
+function buildPayload(payload) {
+  if (payload?.component_update && payload?.component) {
+    return buildComponentEmbed(payload);
+  }
+
+  if (payload?.incident) {
+    return buildIncidentEmbed(payload);
+  }
+
+  return null;
 }
 
 app.post('/api/webhook', async (req, res) => {
-  try {
-    const payload = req.body;
-    let embed;
+  if (!DISCORD_WEBHOOK_URL) {
+    console.error('DISCORD_WEBHOOK_URL is not configured');
+    return res.status(500).json({
+      error: 'Discord webhook is not configured',
+    });
+  }
 
-    if (payload.component_update) {
-      embed = buildComponentEmbed(payload);
-    } else if (payload.incident) {
-      embed = buildIncidentEmbed(payload);
-    } else {
-      return res.status(200).send('No actionable data');
+  try {
+    const embed = buildPayload(req.body);
+
+    if (!embed) {
+      return res.status(200).json({
+        ok: true,
+        ignored: true,
+        message: 'No supported Statuspage event found',
+      });
     }
 
-    await axios.post(DISCORD_WEBHOOK_URL, {
-      username: 'Statuspage',
-      embeds: [embed],
-    });
+    await axios.post(
+      DISCORD_WEBHOOK_URL,
+      {
+        username: 'Statuspage',
+        embeds: [embed],
+      },
+      {
+        timeout: 10000,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
-    res.status(200).send('OK');
-  } catch (err) {
-    console.error(err);
-    res.status(200).send('Handled with error');
+    return res.status(200).json({
+      ok: true,
+    });
+  } catch (error) {
+    console.error(
+      'Failed to forward Statuspage webhook:',
+      error.response?.data || error.message
+    );
+
+    return res.status(502).json({
+      ok: false,
+      error: 'Failed to forward webhook to Discord',
+    });
   }
 });
 
+app.get('/api/webhook', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'statuspage-discord-webhook',
+  });
+});
+
 app.all('/health', (req, res) => {
-  return res.status(200).send('OK');
+  res.status(200).json({
+    ok: true,
+  });
 });
 
 module.exports = app;
